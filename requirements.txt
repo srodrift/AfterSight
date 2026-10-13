@@ -1,0 +1,5 @@
+streamlit>=1.48
+python-dotenv
+hydradb-sdk>=2.1.1,<3
+anthropic
+openai

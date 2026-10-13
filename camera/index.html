@@ -1,0 +1,141 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; background: transparent; font-family: -apple-system, "SF Pro Text", Inter, sans-serif; }
+  .lens { position: relative; width: 100%; aspect-ratio: 3 / 4; background: #050708;
+          border-radius: 28px; overflow: hidden; border: 1px solid #1d2a30;
+          box-shadow: 0 20px 60px rgba(0,0,0,.5), inset 0 0 0 1px rgba(124,255,203,.08); }
+  @media (min-width: 700px) { .lens { aspect-ratio: 16 / 9; } }
+  video, .freeze { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .freeze { display: none; }
+  .vig { position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 140px rgba(0,0,0,.7); }
+  .hud { position: absolute; left: 0; right: 0; padding: 14px 18px; color: #fff; font: 600 13px Menlo, monospace;
+         letter-spacing: .12em; text-shadow: 0 1px 3px #000; display: flex; justify-content: space-between; pointer-events: none; }
+  .top { top: 0; } .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #ff3b3b;
+         margin-right: 8px; animation: b 1.4s infinite; } @keyframes b { 50% { opacity: .2 } }
+  .status { position: absolute; left: 50%; transform: translateX(-50%); bottom: 116px; max-width: 86%;
+            background: rgba(5,10,12,.72); border: 1px solid rgba(124,255,203,.35); color: #7CFFCB;
+            font: 13px Menlo, monospace; padding: 8px 14px; border-radius: 999px; text-align: center; backdrop-filter: blur(8px); }
+  .corner { position: absolute; width: 34px; height: 34px; border-color: rgba(124,255,203,.75); border-style: solid; pointer-events: none; }
+  .tl { top: 52px; left: 18px; border-width: 3px 0 0 3px; } .tr { top: 52px; right: 18px; border-width: 3px 3px 0 0; }
+  .bl { bottom: 100px; left: 18px; border-width: 0 0 3px 3px; } .br { bottom: 100px; right: 18px; border-width: 0 3px 3px 0; }
+  .controls { position: absolute; left: 0; right: 0; bottom: 18px; display: flex; justify-content: center; align-items: center; gap: 18px; }
+  .shutter { width: 78px; height: 78px; border-radius: 50%; border: 4px solid #fff; background: rgba(124,255,203,.9);
+             box-shadow: 0 0 0 6px rgba(124,255,203,.25); cursor: pointer; }
+  .shutter:disabled { background: #555; box-shadow: none; }
+  .label { color: #fff; font: 600 12px Menlo, monospace; letter-spacing: .2em; text-shadow: 0 1px 3px #000; }
+  .flip { width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,.5); background: rgba(0,0,0,.4);
+          color: #fff; font-size: 20px; cursor: pointer; }
+  .start { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+           background: radial-gradient(600px 400px at 50% 40%, #10232b 0%, #050708 70%); color: #9fb3bd; text-align: center; padding: 20px; }
+  .start button { font: 600 16px -apple-system, Inter, sans-serif; letter-spacing: .22em; color: #04140e; background: #7CFFCB;
+                  border: 0; border-radius: 999px; padding: 16px 30px; cursor: pointer; box-shadow: 0 0 40px rgba(124,255,203,.35); }
+  .start .t { font: 600 26px -apple-system, Inter, sans-serif; letter-spacing: .3em; color: #eef6f8; }
+  .err { color: #ff8a8a; font-size: 14px; max-width: 420px; }
+  .flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .25s; }
+</style>
+</head>
+<body>
+<div class="lens" id="lens">
+  <video id="v" playsinline muted autoplay></video>
+  <img class="freeze" id="freeze" alt="">
+  <div class="vig"></div>
+  <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+  <div class="hud top"><span><span class="dot" id="dot"></span><span id="clock">--:--</span></span><span id="cam">CAMERA OFF</span></div>
+  <div class="status" id="status">Point at something worth remembering</div>
+  <div class="controls">
+    <button class="flip" id="flip" title="Switch camera">⟲</button>
+    <button class="shutter" id="shutter" title="Remember this" disabled></button>
+    <span class="label">REMEMBER<br>THIS</span>
+  </div>
+  <div class="flash" id="flash"></div>
+  <div class="start" id="start">
+    <div class="t">AFTERSIGHT</div>
+    <div>Your eyes see it. Your AI remembers it.</div>
+    <button id="go">START VISION</button>
+    <div class="err" id="err"></div>
+  </div>
+</div>
+<script>
+// Minimal Streamlit component protocol (no build step)
+function send(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data), "*"); }
+function setHeight() { send("streamlit:setFrameHeight", { height: document.body.scrollHeight + 4 }); }
+
+const $ = id => document.getElementById(id);
+const v = $("v");
+let stream = null, facing = "environment", busy = false, lastNonce = null;
+
+window.addEventListener("message", ev => {
+  const d = ev.data || {};
+  if (d.type !== "streamlit:render") return;
+  const a = d.args || {};
+  // Python reports back the result of the last capture
+  if (a.status_nonce && a.status_nonce !== lastNonce) {
+    lastNonce = a.status_nonce;
+    $("status").textContent = a.status || "";
+    busy = false;
+    $("shutter").disabled = !stream;
+    $("freeze").style.display = "none";   // back to the live camera
+  }
+  setHeight();
+});
+
+function tick() {
+  const d = new Date();
+  $("clock").textContent = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }).toUpperCase();
+}
+setInterval(tick, 1000); tick();
+
+async function start() {
+  $("err").textContent = "";
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    $("err").textContent = "Camera needs a secure (HTTPS) page. Open AFTERSIGHT through the https:// tunnel link, or on this computer via http://localhost.";
+    return;
+  }
+  try {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+    });
+    v.srcObject = stream;
+    await v.play();
+    $("start").style.display = "none";
+    $("shutter").disabled = false;
+    $("cam").textContent = (facing === "environment" ? "REAR" : "FRONT") + " CAMERA · LIVE";
+  } catch (e) {
+    $("err").textContent = "Camera unavailable: " + (e && e.name ? e.name + " — " : "") + (e && e.message ? e.message : e) +
+      ". Allow camera access for this site and try again.";
+  }
+}
+
+function capture() {
+  if (busy || !stream || !v.videoWidth) return;
+  busy = true;
+  $("shutter").disabled = true;
+  const maxW = 1280, scale = Math.min(1, maxW / v.videoWidth);
+  const c = document.createElement("canvas");
+  c.width = Math.round(v.videoWidth * scale); c.height = Math.round(v.videoHeight * scale);
+  c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+  const url = c.toDataURL("image/jpeg", 0.85);
+  $("freeze").src = url; $("freeze").style.display = "block";
+  $("flash").style.opacity = .8; setTimeout(() => $("flash").style.opacity = 0, 180);
+  $("status").textContent = "VISION → UNDERSTANDING → MEMORY …";
+  send("streamlit:setComponentValue", {
+    value: { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), image: url.split(",")[1],
+             w: c.width, h: c.height, facing },
+    dataType: "json"
+  });
+}
+
+$("go").onclick = start;
+$("shutter").onclick = capture;
+$("flip").onclick = () => { facing = facing === "environment" ? "user" : "environment"; if (stream) start(); };
+window.addEventListener("resize", setHeight);
+send("streamlit:componentReady", { apiVersion: 1 });
+setTimeout(setHeight, 50);
+</script>
+</body>
+</html>

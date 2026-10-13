@@ -1,0 +1,7 @@
+.env
+.venv/
+events.json
+shopping.json
+actions.json
+images/
+__pycache__/
