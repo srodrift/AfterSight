@@ -5,3 +5,6 @@ shopping.json
 actions.json
 images/
 __pycache__/
+stub_calls.log
+*.png
+.streamlit/secrets.toml

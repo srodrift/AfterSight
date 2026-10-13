@@ -36,6 +36,13 @@
   .start .t { font: 600 26px -apple-system, Inter, sans-serif; letter-spacing: .3em; color: #eef6f8; }
   .err { color: #ff8a8a; font-size: 14px; max-width: 420px; }
   .flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .25s; }
+  .auto { position: absolute; top: 48px; left: 50%; transform: translateX(-50%); display: none; align-items: center; gap: 8px;
+          background: rgba(5,10,12,.78); border: 1px solid rgba(255,90,90,.6); color: #fff; font: 600 12px Menlo, monospace;
+          letter-spacing: .12em; padding: 6px 8px 6px 12px; border-radius: 999px; backdrop-filter: blur(8px); z-index: 5; }
+  .auto .adot { width: 9px; height: 9px; border-radius: 50%; background: #ff4d4d; animation: b 1.2s infinite; }
+  .auto #anext { color: #95A5A3; font-weight: 500; }
+  .auto button { font: 700 11px Menlo, monospace; letter-spacing: .1em; color: #fff; background: #ff4d4d; border: 0;
+                 border-radius: 999px; padding: 5px 10px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -45,6 +52,7 @@
   <div class="vig"></div>
   <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
   <div class="hud top"><span><span class="dot" id="dot"></span><span id="clock">--:--</span></span><span id="cam">CAMERA OFF</span></div>
+  <div class="auto" id="auto"><span class="adot"></span>AUTO MEMORY<span id="anext"></span><button id="astop">STOP</button></div>
   <div class="status" id="status">Point at something worth remembering</div>
   <div class="controls">
     <button class="flip" id="flip" title="Switch camera">⟲</button>
@@ -67,11 +75,16 @@ function setHeight() { send("streamlit:setFrameHeight", { height: document.body.
 const $ = id => document.getElementById(id);
 const v = $("v");
 let stream = null, facing = "environment", busy = false, lastNonce = null;
+let autoOn = false, intervalMs = 10000, nextAt = 0;
 
 window.addEventListener("message", ev => {
   const d = ev.data || {};
   if (d.type !== "streamlit:render") return;
   const a = d.args || {};
+  const wasAuto = autoOn;
+  autoOn = !!a.auto; intervalMs = Math.max(4000, a.interval_ms || 10000);
+  $("auto").style.display = autoOn ? "flex" : "none";
+  if (autoOn && !wasAuto) nextAt = Date.now() + 1500;
   // Python reports back the result of the last capture
   if (a.status_nonce && a.status_nonce !== lastNonce) {
     lastNonce = a.status_nonce;
@@ -88,6 +101,15 @@ function tick() {
   $("clock").textContent = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }).toUpperCase();
 }
 setInterval(tick, 1000); tick();
+
+// Auto Memory: only samples while Python says it's on AND the user has started the camera.
+setInterval(() => {
+  if (!autoOn) return;
+  if (!stream) { $("anext").textContent = " · START VISION TO BEGIN"; return; }
+  const left = Math.max(0, Math.ceil((nextAt - Date.now()) / 1000));
+  $("anext").textContent = busy ? " · ANALYZING" : " · NEXT " + left + "S";
+  if (!busy && Date.now() >= nextAt) { nextAt = Date.now() + intervalMs; capture("auto"); }
+}, 500);
 
 async function start() {
   $("err").textContent = "";
@@ -111,8 +133,9 @@ async function start() {
   }
 }
 
-function capture() {
+function capture(mode) {
   if (busy || !stream || !v.videoWidth) return;
+  mode = mode === "auto" ? "auto" : "manual";
   busy = true;
   $("shutter").disabled = true;
   const maxW = 1280, scale = Math.min(1, maxW / v.videoWidth);
@@ -120,18 +143,24 @@ function capture() {
   c.width = Math.round(v.videoWidth * scale); c.height = Math.round(v.videoHeight * scale);
   c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
   const url = c.toDataURL("image/jpeg", 0.85);
-  $("freeze").src = url; $("freeze").style.display = "block";
-  $("flash").style.opacity = .8; setTimeout(() => $("flash").style.opacity = 0, 180);
-  $("status").textContent = "VISION → UNDERSTANDING → MEMORY …";
+  if (mode === "manual") {
+    $("freeze").src = url; $("freeze").style.display = "block";
+    $("flash").style.opacity = .8; setTimeout(() => $("flash").style.opacity = 0, 180);
+  }
+  $("status").textContent = (mode === "auto" ? "AUTO · " : "") + "PERCEPTION → UNDERSTANDING → MEMORY …";
   send("streamlit:setComponentValue", {
     value: { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), image: url.split(",")[1],
-             w: c.width, h: c.height, facing },
+             w: c.width, h: c.height, facing, mode },
     dataType: "json"
   });
 }
 
 $("go").onclick = start;
-$("shutter").onclick = capture;
+$("shutter").onclick = () => capture("manual");
+$("astop").onclick = () => {
+  autoOn = false; $("auto").style.display = "none";
+  send("streamlit:setComponentValue", { value: { id: Date.now() + "-stop", cmd: "stop_auto" }, dataType: "json" });
+};
 $("flip").onclick = () => { facing = facing === "environment" ? "user" : "environment"; if (stream) start(); };
 window.addEventListener("resize", setHeight);
 send("streamlit:componentReady", { apiVersion: 1 });

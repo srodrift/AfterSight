@@ -1,0 +1,126 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; background: transparent; font-family: Inter, -apple-system, "SF Pro Text", sans-serif; }
+  .wrap { display: flex; align-items: center; gap: 14px; padding: 4px 2px; }
+  .mic { width: 56px; height: 56px; border-radius: 50%; border: 1px solid rgba(114,245,194,.45); background: #111719;
+         color: #72F5C2; font-size: 22px; cursor: pointer; flex: 0 0 auto; transition: transform .15s, background .15s;
+         -webkit-user-select: none; user-select: none; touch-action: none; }
+  .mic:hover { background: #16201f; }
+  .mic.rec { background: #72F5C2; color: #06110d; transform: scale(1.06); box-shadow: 0 0 0 8px rgba(114,245,194,.15); }
+  .mic:disabled { opacity: .4; cursor: not-allowed; }
+  .txt { color: #95A5A3; font-size: 14px; line-height: 1.35; }
+  .txt b { color: #F3F6F5; font-weight: 600; }
+  .bars { display: inline-flex; gap: 3px; height: 18px; align-items: center; margin-left: 6px; vertical-align: middle; }
+  .bars i { width: 3px; background: #72F5C2; border-radius: 2px; height: 4px; transition: height .08s; }
+  .err { color: #ff8a8a; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <button class="mic" id="mic" title="Hold to talk">🎙</button>
+  <div class="txt" id="txt"><b>Hold to talk</b> · release to ask. Or tap once to start, tap again to stop.</div>
+</div>
+<script>
+function send(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data), "*"); }
+function setHeight() { send("streamlit:setFrameHeight", { height: document.body.scrollHeight + 4 }); }
+const $ = id => document.getElementById(id);
+let rec = null, chunks = [], stream = null, startedAt = 0, analyser = null, raf = null, disabled = false, holdTimer = null, held = false;
+
+window.addEventListener("message", ev => {
+  const d = ev.data || {};
+  if (d.type !== "streamlit:render") return;
+  const a = d.args || {};
+  disabled = !!a.disabled;
+  $("mic").disabled = disabled;
+  if (a.status) $("txt").innerHTML = a.status;
+  setHeight();
+});
+
+function pickMime() {
+  const opts = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"];
+  for (const m of opts) if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) return m;
+  return "";
+}
+
+function meter() {
+  if (!analyser) return;
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(buf);
+  const bars = document.querySelectorAll(".bars i");
+  bars.forEach((b, i) => { const v = buf[(i * 7) % buf.length] / 255; b.style.height = (4 + v * 16) + "px"; });
+  raf = requestAnimationFrame(meter);
+}
+
+async function start() {
+  if (disabled || rec) return;
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    $("txt").innerHTML = "<span class='err'>Microphone needs a secure page (localhost or https).</span>"; return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    $("txt").innerHTML = "<span class='err'>Microphone blocked: " + (e.name || e) + ". Allow mic access for this site.</span>"; return;
+  }
+  const mime = pickMime();
+  rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  chunks = [];
+  rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  rec.onstop = finish;
+  rec.start();
+  startedAt = Date.now();
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = ctx.createAnalyser(); analyser.fftSize = 64;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+  } catch (e) { analyser = null; }
+  $("mic").classList.add("rec");
+  $("txt").innerHTML = "<b>Listening…</b> <span class='bars'><i></i><i></i><i></i><i></i><i></i></span>";
+  meter();
+}
+
+function stop() {
+  if (!rec) return;
+  rec.stop();
+  $("mic").classList.remove("rec");
+  if (raf) cancelAnimationFrame(raf);
+}
+
+function finish() {
+  const dur = Date.now() - startedAt;
+  stream.getTracks().forEach(t => t.stop());
+  const type = (rec && rec.mimeType) || "audio/webm";
+  rec = null;
+  if (dur < 400 || !chunks.length) { $("txt").innerHTML = "<b>Too short</b> · hold a little longer."; return; }
+  const blob = new Blob(chunks, { type });
+  const fr = new FileReader();
+  fr.onload = () => {
+    $("txt").innerHTML = "<b>Transcribing…</b>";
+    send("streamlit:setComponentValue", {
+      value: { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), audio: fr.result.split(",")[1], mime: type, ms: dur },
+      dataType: "json"
+    });
+  };
+  fr.readAsDataURL(blob);
+}
+
+// Push-to-talk: hold (pointer down/up). A quick tap toggles instead.
+const mic = $("mic");
+mic.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  if (rec) { stop(); return; }
+  held = false;
+  start();
+  holdTimer = setTimeout(() => { held = true; }, 350);
+});
+mic.addEventListener("pointerup", () => { clearTimeout(holdTimer); if (held && rec) stop(); });
+mic.addEventListener("pointerleave", () => { clearTimeout(holdTimer); if (held && rec) stop(); });
+
+send("streamlit:componentReady", { apiVersion: 1 });
+setTimeout(setHeight, 50);
+</script>
+</body>
+</html>

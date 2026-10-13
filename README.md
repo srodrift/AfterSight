@@ -1,88 +1,69 @@
-# AFTERSIGHT
+# AFTERSIGHT 2.0
 **Your eyes see it. Your AI remembers it.**
 
-A personal memory brain for smart glasses. AFTERSIGHT turns what your glasses see into timestamped memories. It reasons over them in time order to work out the *latest known state* of things, answers with evidence, and takes actions after you approve them.
+AFTERSIGHT is a visual episodic memory for the physical world. You capture a moment with your camera, as if you were wearing smart glasses. A vision model turns the frame into structured memory: objects, colors, positions, what you were doing, readable text and the scene. That memory is stored as timestamped data in HydraDB. Later you can ask anything about what you've seen, and every answer comes with the memories that support it.
 
-Built for the Company Brain Hackathon (Oct 12, 2026). There's no real Ray-Ban hardware. The camera is simulated (see Limitations).
+> Branch note: `main` is the build submitted to the Company Brain Hackathon (Oct 12, 2026), tagged `v8`. This branch, `aftersight-2.0`, is the post-hackathon product.
 
-## Remember → Reason → Act
-- **Remember:** each glasses capture becomes a memory (time, place, caption, detected objects). It's written to **HydraDB** as a `type="memory"` record and mirrored to a local event log.
-- **Reason:** a **deterministic temporal state engine** replays every memory in time order:
-  - *observed* counts are ground truth
-  - *used* and *added* events produce *estimates*
-  - a *purchase* never counts as being at home until the item is seen there
-  - when a later observation corrects an estimate, that correction is recorded
+## What it does
+| | |
+|---|---|
+| **See** | Live in-app camera, rear camera by default, using `getUserMedia`. **Remember this** captures one frame and runs it through three real stages: **Perception → Understanding → Memory**. The Memory stage only shows success after HydraDB confirms the write. Otherwise it reads *local only*. |
+| **Remember** | Each capture is stored as an episodic memory. It holds a caption, the scene, objects (name, count, attributes, position), interactions such as "holding a yellow mug in the right hand", and details such as readable text. The photo is kept locally. A deterministic **temporal state engine** replays observations in order to separate *observed* facts from *inferred* changes. |
+| **Ask** | Ask in free text or push-to-talk voice. Retrieval combines a local index (captions, objects, colors, places, time of day, recency) with HydraDB (OpenCypher graph and/or managed). If the answer depends on a visual detail that was never written down, the agent **re-examines the retained photo** with the vision model rather than guessing. Every answer is labeled OBSERVED, INFERRED or UNKNOWN and shows its evidence. |
+| **Act** | Recommendations, such as "add eggs to the shopping list", are created as *pending* actions. Nothing happens until you **Approve** or **Dismiss**. Activity shows pending, approved, dismissed, the list and full history. |
+| **Auto Memory** | Opt-in, with an explicit consent checkbox. It samples one frame every ~10 s while the camera is running, and stores a memory **only when something meaningfully changed**: a new object, a count change, or an object moved. Unchanged frames are discarded and no video is recorded. A visible HUD indicator and **Stop** button are always on screen, and a per-session cap applies. |
+| **Rewind my day** | A timeline scrubber through every memory, with the captured photo or the simulated scene. It sits alongside search, time/place/source filters, per-object change chains, and a side-by-side comparison of two moments. |
 
-  The LLM doesn't do the arithmetic. It interprets the question, uses the retrieved HydraDB evidence plus the engine state, and answers with *when* and *where* it last saw something. It never claims certainty it doesn't have (for example, "I saw the medication bottle but can't confirm you took it").
-- **Act:** when something is low or you ask what to buy, the agent *proposes* shopping-list items. Nothing is added until you approve.
-
-## Run
+## Run locally
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # add HYDRA_DB_API_KEY and an Anthropic or OpenAI key
-streamlit run app.py
+cp .env.example .env        # add OPENAI_API_KEY (or ANTHROPIC_API_KEY); voice needs OpenAI
+streamlit run app.py        # http://localhost:8501 — camera & mic work on localhost
 ```
+**Self-hosted HydraDB:** set `HYDRA_GRAPH_URL=http://127.0.0.1:8443` and `HYDRA_GRAPH_TOKEN`, then run `python graph_store.py --selftest`, which should print **PASS**. Then go to Settings and click **Sync unsynced → HydraDB**.
 
-## Live Vision (wearable camera mode)
-**VISION → ◉ Live Vision → START VISION.** The rear camera opens inside AFTERSIGHT. Tap **REMEMBER THIS** and the current frame goes through:
-1. **Vision:** the frame is sent to the vision model.
-2. **Understanding:** objects, counts and the kind of place are extracted.
-3. **Memory:** the memory is saved locally with its photo, then written to HydraDB. The status pill reports honestly whether the HydraDB write succeeded.
+## Deploy (Streamlit Community Cloud)
+Vercel can't host this app. It's serverless, and Streamlit needs a long-running Python server with a WebSocket. Use Streamlit Community Cloud instead:
+1. On share.streamlit.io, choose New app → repo `srodrift/AfterSight` → branch `aftersight-2.0` → file `app.py`.
+2. Under Advanced settings → Secrets, paste your keys in TOML form: `OPENAI_API_KEY = "…"` and **`APP_PASSWORD = "…"`**. The password gate protects your API credits.
+3. The URL is HTTPS, so camera and microphone work on phones too.
 
-The camera then goes back to live. Captures show up in MEMORY, RECALL and Rewind. Demo mode and Upload are still there as fallbacks.
-
-### On your iPhone (needs HTTPS)
-Safari only allows the camera on secure pages, so use a Cloudflare quick tunnel. It needs no account.
-```bash
-brew install cloudflared
-# 1. set a password first so the public link is protected:
-echo "APP_PASSWORD=pick-a-strong-one" >> .env
-# 2. run the app (terminal 1) and the tunnel (terminal 2):
-streamlit run app.py
-cloudflared tunnel --url http://localhost:8501
-```
-Open the `https://….trycloudflare.com` URL it prints on your iPhone, enter the password, then tap START VISION and allow the camera. Your API keys stay on your Mac. The page only sends frames to your Mac. Stop the tunnel (Ctrl+C) when you're done.
-
-## Self-hosted HydraDB (open-source graph-node)
-AFTERSIGHT can also store memories in a self-hosted [hydra-db/hydradb](https://github.com/hydra-db/hydradb) node through its OpenCypher HTTP API (`POST /v1/graphs/{graph}/query`). It runs alongside the managed HydraDB SDK, either one alone, or neither, in which case only the local log is used.
-
-**Graph model:** each object in a capture becomes one timestamped node:
-```
-(:Observation {obs_id, memory_id, ts, epoch, object, quantity, has_quantity, place, event, source, caption})
-(:Observation)-[:NEXT_SEEN]->(:Observation)    // same object, next sighting
-```
-- `event` is one of observed / used / added / purchased.
-- `source` is camera / simulated / agent.
-- `quantity` is -1 when unknown.
-
-**Writes:** a batched `UNWIND $rows … CREATE`. They're idempotent per `obs_id`.
-**Recall:** `MATCH (o:Observation) WHERE o.object IN $objects … ORDER BY o.epoch DESC`. Objects are matched from the question, so "egg" finds "eggs".
-
-**Setup** (in `.env`):
-```
-HYDRA_GRAPH_URL=http://127.0.0.1:8443
-HYDRA_GRAPH_TOKEN=<contents of your auth-token file>   # or HYDRA_GRAPH_TOKEN_FILE=/path/to/auth-token
-```
-**Verify** with a real round trip before demoing: `python graph_store.py --selftest`. It writes a node, re-writes it (expect 0 new) and reads it back. Then click **SYSTEM → Sync unsynced → HydraDB** to load existing memories into the graph.
-
-## Demo script
-1. **Vision tab:** live HUD view. Use **Rewind my day** to scrub through what the glasses saw.
-2. **Recall tab:** ask "Do I have eggs?" → 2 eggs, seen at 6:05 PM. It also offers to add eggs to the list.
-3. **Vision tab:** choose **Demo scenes**, then click **Use the last 2 eggs**.
-4. **Recall tab:** ask "Do I have eggs?" again. The answer changes to an estimated 0, with evidence. Approve **eggs** for the shopping list.
-5. Ask "Where are my keys?", "Did I take my medication?", "Where did I park?"
-6. **Memory tab:** the egg timeline (6 → 2 → none left) shows the temporal reasoning.
-7. **System tab:** HydraDB status, memories written, retrieval hits, and the state-engine tests (6/6) plus agent eval.
+A self-hosted HydraDB on your laptop (127.0.0.1) isn't reachable from the cloud. The hosted app uses managed HydraDB if `HYDRA_DB_API_KEY` is set, or the local memory log otherwise, and Settings reports which one is active. Hosted storage is ephemeral, so memories reset when the app restarts.
 
 ## Architecture
 ```
-Live camera frame (getUserMedia component) / upload / demo scene → vision model
-        → memory event → HydraDB (type=memory) + local event log
-Question → HydraDB hybrid retrieval → temporal state engine → LLM agent
-        → answer with evidence + proposed action → user approval → shopping list
+camera/ (getUserMedia component) ──frame──▶ analyze_frame (vision model → structured memory JSON)
+   │  Auto Memory: memory_search.meaningful_change → store or discard
+   ▼
+add_event ──▶ local log (events.json + images/)  ──▶ HydraDB: graph_store.py (OpenCypher HTTP) / managed SDK
+question (text or voice/ → STT) ──▶ memory_search.search_events + HydraDB retrieval
+   ──▶ temporal state engine (compute_state) ──▶ LLM answer (JSON, evidence ids)
+   ──▶ optional re-examination of retained photos ──▶ answer (+ TTS) ──▶ pending actions ──▶ Approve/Dismiss
 ```
+| File | Role |
+|---|---|
+| `app.py` | Streamlit app: UI, vision pipeline, `ask()`, actions, temporal engine |
+| `memory_search.py` | Pure retrieval + Auto Memory change detection (unit-tested) |
+| `graph_store.py` | Self-hosted HydraDB adapter. One `(:Observation)` node per object sighting, plus `NEXT_SEEN` edges |
+| `voice.py`, `voice/` | OpenAI speech-to-text / text-to-speech, push-to-talk component |
+| `camera/` | Live camera component (manual + Auto Memory sampling, HUD, Stop) |
+| `scene.py` | Rendered frames for simulated demo memories |
 
-## Limitations (honest)
-- **Camera input is simulated.** The scenes are drawn frames. A real photo can be run through a vision model in the Glasses tab, but the vision model's counts aren't reliable enough to drive the main demo.
-- **Retrieval fallback.** If HydraDB is unavailable or a new memory hasn't been indexed yet, the agent falls back to the local log. The evidence panel always shows which source was used.
-- **Single user, no auth.** Memories are created only by deliberate captures, not continuous recording.
+## Tests
+| Suite | What it proves | Real or mocked |
+|---|---|---|
+| `python -m unittest discover -s tests -v` (**26 tests**) | Temporal engine (the 6 original + compatibility), open-ended retrieval, Auto Memory duplicate suppression and change detection, HydraDB adapter write/read/idempotency/auth, voice helpers | **Offline.** The HydraDB adapter runs against `tests/mock_hydradb.py`, a mock that enforces the documented OpenCypher subset |
+| `tests/e2e_browser.py` (**11 checks**) | Real headless browser with a fake camera and mic covering camera → Python → memory, Auto Memory (duplicate suppressed, change stored, HUD stop), photo re-examination, push-to-talk → transcript → spoken answer, all views, mobile | **Model stubbed** (`tests/stubs/openai.py`). It proves the wiring, not model quality |
+| `python graph_store.py --selftest` | Real write → idempotent re-write → read against your HydraDB server | **Real database** |
+| Settings → Agent eval | Five grounded questions answered by your real model | **Real model** |
+
+Last results on this branch: unit 26/26 · E2E 11/11 · state engine 6/6. Real-server and real-model checks are run on the developer's machine. The graph adapter is unchanged from the version whose self-test passed against a live HydraDB node.
+
+## Privacy & limits
+- Nothing is analyzed until you capture, or until you enable Auto Memory and start the camera. No video is stored.
+- Photos and memories stay in `images/` and `events.json`, which are git-ignored. Only frames sent for analysis go to your model provider.
+- The vision prompt describes what's visible and does not identify people.
+- Search is keyword search over recorded text. Photos aren't embedded, which is why Ask re-examines photos when needed.
+- Counts and colors come from the vision model and can be wrong. Answers show their evidence so you can check.
